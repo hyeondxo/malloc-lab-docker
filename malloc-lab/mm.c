@@ -28,11 +28,11 @@ team_t team = {
     /* First member's full name */
     "dohyeon park",
     /* First member's email address */
-    "a",
+    ".",
     /* Second member's full name (leave blank if none) */
-    "b",
+    ".",
     /* Second member's email address (leave blank if none) */
-    "c"};
+    "."};
 
 #define WSIZE 4             // word 크기이자 헤더/풋터의 크기(바이트)
 #define DSIZE 8             // double word 크기. 최소 블록 크기(헤더 4 + 풋터 4)와 정렬 단위로 사용
@@ -78,7 +78,8 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t))) // 8로 올림 정렬한 크기
 
-static void *heap_listp = NULL;
+static char *heap_listp = NULL;
+static char *rover = NULL; // Next-fit 탐색 시작지점
 static void *coalesce(void *);
 static void *extend_heap(size_t);
 static void *find_fit(size_t);
@@ -103,9 +104,18 @@ int mm_init(void) {
     heap_listp += (2 * WSIZE);
 
     // 빈 힙을 CHUNKSIZE(4096B)만큼 더 확장하여 첫 가용 블록을 만듦. 실패시 -1
-    if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
+    // 1. First-fit 방식
+    // if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
+    //     return -1;
+    // }
+
+    // 2. Next-fit 방식
+    void *bp_init = extend_heap(CHUNKSIZE / WSIZE);
+    if (bp_init == NULL) {
         return -1;
     }
+    // Next-fit 초기 탐색 위치를 첫 가용블록으로 설정
+    rover = (char *)bp_init;
     return 0;
 }
 // 주소→
@@ -125,15 +135,40 @@ static void *extend_heap(size_t words) {
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // 새로운 에필로그 해더
 
-    return coalesce(bp); // 이전 블록이 가용이라면 병합해서 더 큰 가용블록을 만들어 반환
+    // First-fit 방식
+    // return coalesce(bp); // 이전 블록이 가용이라면 병합해서 더 큰 가용블록을 만들어 반환
+    // Next-fit 방식
+    bp = coalesce(bp);  // 이웃 병합
+    rover = (char *)bp; // 다음 탐색 갱신
+    return bp;
 }
 
 static void *find_fit(size_t asize) {
     /* First-fit 방식*/
+    // void *bp;
+    // for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    //     // 할당되지 않았고 들어갈 크기가 된다면 그 bp를 반환 (할당 가능하단 뜻)
+    //     if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+    //         return bp;
+    //     }
+    // }
+
+    if (rover == NULL) {
+        rover = heap_listp;
+    }
+    // 2. Next-fit 방식
     void *bp;
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        // 할당되지 않았고 들어갈 크기가 된다면 그 bp를 반환 (할당 가능하단 뜻)
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+    // rover부터 시작해서 힙의 끝까지 탐색
+    for (bp = rover; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))) {
+            rover = (char *)bp;
+            return bp;
+        }
+    }
+    // 힙의 시작점부터 rover까지 탐색
+    for (bp = heap_listp; bp != rover; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp))) {
+            rover = (char *)bp;
             return bp;
         }
     }
@@ -145,13 +180,15 @@ static void place(void *bp, size_t asize) {
     if (csize - asize >= 2 * DSIZE) {  // 분할 가능한 자투리가 된다면
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp); // 할당 후 남은 공간은 가용블록으로 분리
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
+        void *newbp = NEXT_BLKP(bp); // 할당 후 남은 공간은 가용블록으로 분리
+        PUT(HDRP(newbp), PACK(csize - asize, 0));
+        PUT(FTRP(newbp), PACK(csize - asize, 0));
+        rover = (char *)newbp; // 다음 탐색은 남은 가용블록부터 시작
     } else {
         // 남는 공간이 충분하지 않으면 그냥 할당(분리 x)
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+        rover = (char *)NEXT_BLKP(bp);
     }
 }
 
@@ -207,7 +244,8 @@ void mm_free(void *ptr) {
     // 헤더/풋터에 기록 후 가용=0으로 표시 -> 헤더 풋터 둘 다 동일한 (size|0)을 가짐
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr); // 바로 좌우 가용 블록과 병합을 시도(즉시 병합)
+    void *bp = coalesce(ptr); // 바로 좌우 가용 블록과 병합을 시도(즉시 병합)
+    rover = (char *)bp;
 }
 
 static void *coalesce(void *ptr) {
@@ -235,7 +273,7 @@ static void *coalesce(void *ptr) {
     } else {
         // Case 4 : 왼쪽 + 현재 + 오른쪽 블록을 병합
         // 새 헤더는 왼쪽 헤더, 새 풋터는 오른쪽 풋터가 됨
-        size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + GET_SIZE(FTRP(NEXT_BLKP(ptr)));
+        size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + GET_SIZE(HDRP(NEXT_BLKP(ptr)));
         PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
         ptr = PREV_BLKP(ptr);
@@ -275,7 +313,6 @@ void *mm_realloc(void *ptr, size_t size) {
     //     copySize = size;
     // memcpy(newptr, oldptr, copySize);
     // mm_free(oldptr);
-
     if (ptr == NULL) {
         return mm_malloc(size);
     }
@@ -306,6 +343,7 @@ void *mm_realloc(void *ptr, size_t size) {
             PUT(HDRP(newbp), PACK(remainder, 0));
             PUT(FTRP(newbp), PACK(remainder, 0));
             coalesce(newbp); // 인접 가용 블록을 병합
+            rover = (char *)newbp;
         }
         return ptr;
     }
@@ -325,6 +363,8 @@ void *mm_realloc(void *ptr, size_t size) {
             void *newbp = NEXT_BLKP(ptr);
             PUT(HDRP(newbp), PACK(remainder, 0));
             PUT(FTRP(newbp), PACK(remainder, 0));
+            newbp = coalesce(newbp);
+            rover = (char *)newbp;
         } else { // 공간 없으면 그냥 합친 크기만큼 할당
             PUT(HDRP(ptr), PACK(newsize, 1));
             PUT(FTRP(ptr), PACK(newsize, 1));
@@ -337,7 +377,7 @@ void *mm_realloc(void *ptr, size_t size) {
         return NULL;
     }
 
-    size_t old_payload = oldsize - DSIZE;
+    size_t old_payload = GET_SIZE(HDRP(ptr)) - 2 * WSIZE;
     size_t copysize = MIN(size, old_payload);
     memcpy(newptr, ptr, copysize);
     mm_free(ptr);
