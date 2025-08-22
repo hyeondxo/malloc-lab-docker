@@ -39,6 +39,7 @@ team_t team = {
 #define CHUNKSIZE (1 << 12) // 힙을 한 번에 얼만큼 확장할지의 기본값(4096B)
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 두 값의 최댓값 매크로
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 #define PACK(size, alloc) ((size) | (alloc)) // 한 워드에 블록 전체 크기와 할당 비트를 OR로 묶어 저장
 // size는 8의 배수로 저장, alloc은 하위 비트(보통 bit0) 사용(0=free, 1=alloc)
@@ -247,17 +248,98 @@ static void *coalesce(void *ptr) {
  * 가능하면 제자리, 안 되면 이동
  */
 void *mm_realloc(void *ptr, size_t size) {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
+    // void *oldptr = ptr;
+    // void *newptr;
+    // size_t copySize;
 
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
+    // newptr = mm_malloc(size);
+    // if (newptr == NULL)
+    //     return NULL;
+    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    // /**
+    //  * copySize 계산 로직의 문제점
+    //  * 1. 오프셋 불일치
+    //  * 올바른 헤더는 bp부터 4를 빼야한다. 하지만 SIZE_T_SIZE는 8을 빼게되고 그렇다면 이전 블록의 풋터 위치로 가게됨
+    //  * 그리고 8바이트를 통째로 읽으면 이전 풋터 4B + 현재 헤더 4B가 한 번에 읽혀버림 -> 유효한 크기가 아님
+    //  * 만약 32비트 환경에서 우연히 4비트를 빼게 되어 헤더의 위치가 같아져도 다음 오류가 발생
+    //  * 2. 값 내용 불일치
+    //  * 헤더 워드에는 (size|alloc_bit)가 존재함. 그런데 이 워드를 size_t로 읽게되면
+    //  * 할당 비트가 섞여 정확한 크기만을 뽑아낼 수 없게 됨
+    //  * 예를 들어 실제 크기가 24라면 헤더 워드는 24|1이 되고, size_t만큼 읽으면 25가 됨.
+    //  * 이걸 그대로 복사 길이로 써서는 안됨
+    //  * 또한 헤더에 저장된 크기 24는 전체 크기 + 헤더와 풋터(8B)이지만 우리가 복사해야하는 값은 payload의 크기인 16임.
+    //  * 따라서 올바른 이전 블록의 크기는 GET_SIZE(HDRP(oldptr))를 통해 마스킹 로직으로 크기만을 뽑아야 하고
+    //  * 원본 payload의 정확한 크기는 MIN(old_payload, size)가 되어야 함.
+    //  */
+    // if (size < copySize)
+    //     copySize = size;
+    // memcpy(newptr, oldptr, copySize);
+    // mm_free(oldptr);
+
+    if (ptr == NULL) {
+        return mm_malloc(size);
+    }
+    if (size == 0) {
+        mm_free(ptr);
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
+    }
+
+    // asize 계산(헤더/풋터 포함 + 8바이트 정렬, 최소 16바이트)
+    size_t asize;
+    if (size <= DSIZE) {
+        asize = 2 * DSIZE;
+    } else {
+        asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
+    }
+
+    size_t oldsize = GET_SIZE(HDRP(ptr)); // 현재 블록 크기(헤더/풋터 포함)
+
+    // 제자리 축소
+    if (asize <= oldsize) { // 기존 공간보다 작은 공간으로 재할당해야하는 경우
+        size_t remainder = oldsize - asize;
+        if (remainder >= 2 * DSIZE) { // 남은 공간이 여유로울 때 -> 분할
+            // 먼저 사용으로 분할
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            // 새로운 포인터를 계산하여 가용으로 분할
+            void *newbp = NEXT_BLKP(ptr);
+            PUT(HDRP(newbp), PACK(remainder, 0));
+            PUT(FTRP(newbp), PACK(remainder, 0));
+            coalesce(newbp); // 인접 가용 블록을 병합
+        }
+        return ptr;
+    }
+
+    // 제자리 확장
+    void *next_bp = NEXT_BLKP(ptr);
+    size_t next_alloc = GET_ALLOC(HDRP(next_bp));
+    size_t next_size = GET_SIZE(HDRP(next_bp));
+    // 다음 블록이 가용이고, 다음블록까지 크기를 합치면 그 자리에 할당 가능할 때
+    if (!next_alloc && (oldsize + next_size) >= asize) {
+        size_t newsize = oldsize + next_size;
+        size_t remainder = newsize - asize;
+        // 마찬가지로 남은 공간을 계산하여 분할 할당 or 일반 할당
+        if (remainder >= 2 * DSIZE) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            void *newbp = NEXT_BLKP(ptr);
+            PUT(HDRP(newbp), PACK(remainder, 0));
+            PUT(FTRP(newbp), PACK(remainder, 0));
+        } else { // 공간 없으면 그냥 합친 크기만큼 할당
+            PUT(HDRP(ptr), PACK(newsize, 1));
+            PUT(FTRP(ptr), PACK(newsize, 1));
+        }
+        return ptr;
+    }
+    // 제자리 확장에 실패 한 것이므로 완전히 새로운 블록을 할당 후 기존은 free
+    void *newptr = mm_malloc(size);
+    if (newptr == NULL) {
+        return NULL;
+    }
+
+    size_t old_payload = oldsize - DSIZE;
+    size_t copysize = MIN(size, old_payload);
+    memcpy(newptr, ptr, copysize);
+    mm_free(ptr);
     return newptr;
 }
