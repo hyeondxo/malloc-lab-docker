@@ -89,6 +89,7 @@ team_t team = {
 
 static char *heap_listp = NULL;
 static char *free_listp = NULL; // 가용 리스트의 헤드
+static char *rover = NULL;
 static void *coalesce(void *);
 static void *extend_heap(size_t);
 static void *find_fit(size_t);
@@ -119,6 +120,7 @@ int mm_init(void) {
     if (bp_init == NULL) {
         return -1;
     }
+    rover = free_listp;
     return 0;
 }
 // 주소→
@@ -140,22 +142,43 @@ static void *extend_heap(size_t words) {
 
     bp = coalesce(bp); // 이웃 병합
     insert_free(bp);   // 병합 결과를 가용 리스트에 삽입
+    rover = (char *)bp;
     return bp;
 }
 
-// 1. First-fit 방식으로 할당 블록 찾기
 static void *find_fit(size_t asize) {
-    // 가용 리스트의 head부터 하나씩 순회
-    for (char *bp = free_listp; bp != NULL; bp = SUCC(bp)) {
-        if (asize <= GET_SIZE(HDRP(bp))) {
-            return bp;
+    // 1. First-fit 방식으로 할당 블록 찾기 가용 리스트의 head부터 하나씩 순회
+    // for (char *bp = free_listp; bp != NULL; bp = SUCC(bp)) {
+    //     if (asize <= GET_SIZE(HDRP(bp))) {
+    //         return bp;
+    //     }
+    // }
+
+    // 2. Next-fit 방식으로 찾기
+    if (free_listp == NULL)
+        return NULL;
+    char *bp = (rover ? rover : free_listp);
+
+    for (char *p = bp; p != NULL; p = SUCC(p)) {
+        if (GET_SIZE(HDRP(p)) >= asize) {
+            rover = SUCC(p); // 다음 탐색은 여기서 시작
+            return p;
         }
+    }
+    for (char *p = free_listp; p != bp; p = SUCC(p)) {
+        if (GET_SIZE(HDRP(p)) >= asize) {
+            rover = SUCC(p);
+            return p;
+        }
+        if (p == NULL)
+            break; // 빈 리스트 방어
     }
     return NULL; // 가능한 칸을 찾지 못했을 경우
 }
 
 static void place(void *bp, size_t asize) {
-    size_t csize = GET_SIZE(HDRP(bp));   // asize를 놓을 bp의 크기
+    size_t csize = GET_SIZE(HDRP(bp)); // asize를 놓을 bp의 크기
+    char *next_before = SUCC(bp);
     remove_free(bp);                     // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
     if (csize - asize >= MIN_FREE_BLK) { // 분할 가능한 자투리가 된다면
         // 앞부분 할당 표기
@@ -166,10 +189,14 @@ static void place(void *bp, size_t asize) {
         PUT(FTRP(newbp), PACK(csize - asize, 0));
         newbp = coalesce(newbp); // 인접과 병합
         insert_free(newbp);      // 새로 생긴 가용 블록을 가용 리스트에 삽입
+        rover = newbp;
     } else {
         // 남는 공간이 충분하지 않으면 그냥 할당(분리 x)
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+        rover = (next_before ? next_before : free_listp);
+        if (free_listp == NULL)
+            rover = NULL;
     }
 }
 
@@ -213,18 +240,53 @@ void *mm_malloc(size_t size) {
 
 // 가용 리스트 맨 앞에 삽입(LIFO)
 static void insert_free(void *bp) {
-    SUCC(bp) = free_listp;     // bp의 다음 값은 기존의 헤드 -> bp가 헤드가 되어야하기 때문 : bp -> oldhead
-    PRED(bp) = NULL;           // bp의 이전 값은 null
-    if (free_listp != NULL) {  // 헤드가 존재했다면
-        PRED(free_listp) = bp; // 기존 헤드의 이전값은 bp가 됨 : bp -> <- oldhead
+    // 1. LIFO 방식
+    // SUCC(bp) = free_listp;     // bp의 다음 값은 기존의 헤드 -> bp가 헤드가 되어야하기 때문 : bp -> oldhead
+    // PRED(bp) = NULL;           // bp의 이전 값은 null
+    // if (free_listp != NULL) {  // 헤드가 존재했다면
+    //     PRED(free_listp) = bp; // 기존 헤드의 이전값은 bp가 됨 : bp -> <- oldhead
+    // }
+    // free_listp = bp; // freelistp -> bp -> <- oldhead
+
+    // 2. 주소 오름차순 정렬 방식
+    if (free_listp == NULL) { // 헤드로 삽입
+        PRED(bp) = NULL;
+        SUCC(bp) = NULL;
+        free_listp = bp;
+        return;
     }
-    free_listp = bp; // freelistp -> bp -> <- oldhead
+
+    if (bp < (void *)free_listp) { // 헤드보다 앞 주소라면
+        PRED(bp) = NULL;
+        SUCC(bp) = free_listp;
+        PRED(free_listp) = bp;
+        free_listp = bp;
+        return;
+    }
+
+    // 중간 혹은 마지막 삽입의 경우
+    char *prev = free_listp;
+    char *curr = SUCC(free_listp);
+    while (curr != NULL && curr < (char *)bp) {
+        prev = curr;
+        curr = SUCC(curr);
+    }
+    PRED(bp) = prev;
+    SUCC(bp) = curr;
+    SUCC(prev) = bp;
+    if (curr != NULL) { // 꼬리가 아닐 경우
+        PRED(curr) = bp;
+    }
 }
 
 // 가용 리스트에서 bp 제거
 static void remove_free(void *bp) {
     char *pred = PRED(bp); // *PRED_PTR(bp) 와 같음. pred의 값
     char *succ = SUCC(bp); // 마찬가지
+
+    if (rover == (char *)bp) {
+        rover = succ ? succ : pred;
+    }
 
     // 만약 bp의 이전값이 있다면 이전 값의 다음 값은 현재의 다음값
     // pred -> bp -> succ에서 pred -> succ가 됨
@@ -238,6 +300,9 @@ static void remove_free(void *bp) {
     if (succ) {
         PRED(succ) = pred;
     }
+
+    if (free_listp == NULL)
+        rover = NULL;
 }
 
 /*
@@ -252,6 +317,7 @@ void mm_free(void *ptr) {
     PUT(FTRP(ptr), PACK(size, 0));
     void *bp = coalesce(ptr); // 바로 좌우 가용 블록과 병합을 시도(즉시 병합)
     insert_free(bp);          // 가용 리스트에 추가
+    rover = (char *)bp;
 }
 
 static void *coalesce(void *ptr) {
@@ -264,6 +330,8 @@ static void *coalesce(void *ptr) {
         // 이전과 다음 bp 구하기
         void *prev = PREV_BLKP(ptr);
         void *next = NEXT_BLKP(ptr);
+        if (rover == prev || rover == next)
+            rover = (char *)prev;
         // 둘 다 가용 리스트에서 제거
         remove_free(prev);
         remove_free(next);
@@ -277,6 +345,8 @@ static void *coalesce(void *ptr) {
     } else if (!prev_alloc && next_alloc) { // Case 3 : 이전만 할당 x
         // 이전 bp만 구함
         void *prev = PREV_BLKP(ptr);
+        if (rover == prev)
+            rover = (char *)prev;
         // 이전 bp 가용 리스트에서 제거
         remove_free(prev);
         // size에 이전 크기만큼만 더함
@@ -288,6 +358,8 @@ static void *coalesce(void *ptr) {
         ptr = prev;
     } else if (prev_alloc && !next_alloc) { // Case 2 : 다음만 할당 x
         void *next = NEXT_BLKP(ptr);
+        if (rover == next)
+            rover = (char *)ptr;
         remove_free(next);
         size += GET_SIZE(HDRP(next));
         PUT(HDRP(ptr), PACK(size, 0));
@@ -323,7 +395,7 @@ void *mm_realloc(void *ptr, size_t size) {
     // 제자리 축소
     if (asize <= oldsize) { // 기존 공간보다 작은 공간으로 재할당해야하는 경우
         size_t remainder = oldsize - asize;
-        if (remainder >= MIN_FREE_BLK) { // 남은 공간이 여유로울 때 -> 분할
+        if (remainder >= MIN_FREE_BLK + DSIZE) { // 남은 공간이 여유로울 때 -> 분할
             // 먼저 사용으로 분할
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
