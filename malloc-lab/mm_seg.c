@@ -149,16 +149,23 @@ static void *extend_heap(size_t words) {
 }
 
 static void *find_fit(size_t asize) {
-    // 1. First-fit 방식
+    // 2. Best-fit 방식
     int idx = get_class(asize);
+    char *best_bp = NULL;
+    size_t best_size = (size_t)-1;
     for (int i = idx; i < LISTS; i++) {
         for (char *bp = seg_free_lists[i]; bp != NULL; bp = SUCC(bp)) {
-            if (GET_SIZE(HDRP(bp)) >= asize) {
-                return bp;
+            size_t csize = GET_SIZE(HDRP(bp));
+            if (csize >= asize && csize < best_size) {
+                best_size = csize;
+                best_bp = bp;
+                if (csize == asize) {
+                    return best_bp;
+                }
             }
         }
     }
-    return NULL; // 가능한 칸을 찾지 못했을 경우
+    return best_bp; // 가능한 칸을 찾지 못했을 경우
 }
 
 static void place(void *bp, size_t asize) {
@@ -332,7 +339,7 @@ void *mm_realloc(void *ptr, size_t size) {
     // 제자리 축소
     if (asize <= oldsize) { // 기존 공간보다 작은 공간으로 재할당해야하는 경우
         size_t remainder = oldsize - asize;
-        if (remainder >= MIN_FREE_BLK + DSIZE) { // 남은 공간이 여유로울 때 -> 분할
+        if (remainder >= MIN_FREE_BLK) { // 남은 공간이 여유로울 때 -> 분할
             // 먼저 사용으로 분할
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
