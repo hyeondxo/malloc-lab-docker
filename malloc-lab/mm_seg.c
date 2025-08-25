@@ -41,7 +41,8 @@ team_t team = {
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 두 값의 최댓값 매크로
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-#define LISTS 20 // 리스트 개수
+#define LISTS 20          // 리스트 개수
+#define REALLOC_BUFFER 32 // Realloc 최적화용 버퍼 크기
 
 #define PACK(size, alloc) ((size) | (alloc)) // 한 워드에 블록 전체 크기와 할당 비트를 OR로 묶어 저장
 // size는 8의 배수로 저장, alloc은 하위 비트(보통 bit0) 사용(0=free, 1=alloc)
@@ -170,19 +171,29 @@ static void *find_fit(size_t asize) {
 
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp)); // asize를 놓을 bp의 크기
-    char *next_before = SUCC(bp);
-    remove_free(bp);                     // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
-    if (csize - asize >= MIN_FREE_BLK) { // 분할 가능한 자투리가 된다면
+    remove_free(bp);                   // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
+    // 기본 요청 크기에 버퍼를 붙이지. 단 버퍼까지 붙이고도 잔여가 free 최소 크기 이상 남아야 함
+    size_t want = asize + REALLOC_BUFFER;
+    if (csize >= want && (csize - want) >= MIN_FREE_BLK) { // 버퍼까지 줄 수 있을 때
         // 앞부분 할당 표기
+        PUT(HDRP(bp), PACK(want, 1));
+        PUT(FTRP(bp), PACK(want, 1));
+        void *newbp = NEXT_BLKP(bp);
+        size_t remained = csize - want;
+        PUT(HDRP(newbp), PACK(remained, 0));
+        PUT(FTRP(newbp), PACK(remained, 0));
+        newbp = coalesce(newbp);
+        insert_free(newbp);
+    } else if (csize - asize >= MIN_FREE_BLK) { // 버퍼까지 주는 것은 무리
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        void *newbp = NEXT_BLKP(bp); // 할당 후 남은 공간은 가용블록으로 분리
-        PUT(HDRP(newbp), PACK(csize - asize, 0));
-        PUT(FTRP(newbp), PACK(csize - asize, 0));
-        newbp = coalesce(newbp); // 인접과 병합
-        insert_free(newbp);      // 새로 생긴 가용 블록을 가용 리스트에 삽입
-    } else {
-        // 남는 공간이 충분하지 않으면 그냥 할당(분리 x)
+        void *newbp = NEXT_BLKP(bp);
+        size_t remained = csize - asize;
+        PUT(HDRP(newbp), PACK(remained, 0));
+        PUT(FTRP(newbp), PACK(remained, 0));
+        newbp = coalesce(newbp);
+        insert_free(newbp);
+    } else { // 잔여가 너무 작아 통째로 할당
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
     }
@@ -208,6 +219,9 @@ void *mm_malloc(size_t size) {
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
         // size=13 → size+8=21 → +7=28 → /8=3 → *8=24 → asize=24B
         // (헤더/풋터 포함 + 정렬)
+    }
+    if (asize < MIN_FREE_BLK) {
+        asize = MIN_FREE_BLK;
     }
     // 가용 리스트에서 맞는 블록 찾기
     char *bp = find_fit(asize);
@@ -333,24 +347,42 @@ void *mm_realloc(void *ptr, size_t size) {
     } else {
         asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
     }
+    if (asize < MIN_FREE_BLK) {
+        asize = MIN_FREE_BLK;
+    }
+    size_t want = asize + REALLOC_BUFFER;
 
     size_t oldsize = GET_SIZE(HDRP(ptr)); // 현재 블록 크기(헤더/풋터 포함)
     size_t old_payload = oldsize - (2 * WSIZE);
 
     // 제자리 축소
-    if (asize <= oldsize) { // 기존 공간보다 작은 공간으로 재할당해야하는 경우
-        size_t remainder = oldsize - asize;
-        if (remainder >= MIN_FREE_BLK) { // 남은 공간이 여유로울 때 -> 분할
-            // 먼저 사용으로 분할
-            PUT(HDRP(ptr), PACK(asize, 1));
-            PUT(FTRP(ptr), PACK(asize, 1));
-            // 새로운 포인터를 계산하여 가용으로 분할
+    if (asize <= oldsize) {
+        size_t keep = oldsize - asize;
+
+        // 버퍼까지 붙여 분할 가능하면 asize+buffer로 축소 + 잔여 free
+        if (oldsize >= want && (oldsize - want) >= MIN_FREE_BLK) {
+            PUT(HDRP(ptr), PACK(want, 1));
+            PUT(FTRP(ptr), PACK(want, 1));
+
             void *newbp = NEXT_BLKP(ptr);
+            size_t remainder = oldsize - want;
             PUT(HDRP(newbp), PACK(remainder, 0));
             PUT(FTRP(newbp), PACK(remainder, 0));
-            newbp = coalesce(newbp); // 인접 가용 블록을 병합
-            insert_free(newbp);      // 가용 리스트 삽입
+            newbp = coalesce(newbp);
+            insert_free(newbp);
         }
+        // 버퍼까지는 무리지만 정상 분할은 가능한 경우 - asize만 주고 분할
+        else if (keep >= MIN_FREE_BLK) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            void *newbp = NEXT_BLKP(ptr);
+            PUT(HDRP(newbp), PACK(keep, 0));
+            PUT(FTRP(newbp), PACK(keep, 0));
+            newbp = coalesce(newbp);
+            insert_free(newbp);
+        }
+        // [C] 잔여가 너무 작으면: 통째로 유지(내부 버퍼 효과 유지)
         return ptr;
     }
 
@@ -360,77 +392,80 @@ void *mm_realloc(void *ptr, size_t size) {
     size_t next_size = GET_SIZE(HDRP(next_bp));
     // 다음 블록이 가용이고, 다음블록까지 크기를 합치면 그 자리에 할당 가능할 때
     if (!next_alloc && (oldsize + next_size) >= asize) {
-        remove_free(next_bp); // 다음 블록을 제거
-        size_t newsize = oldsize + next_size;
-        size_t remainder = newsize - asize;
-        // 마찬가지로 남은 공간을 계산하여 분할 할당 or 일반 할당
+        remove_free(next_bp);
+        size_t total = oldsize + next_size;
+
+        // 버퍼까지 주고도 잔여가 free 최소크기 이상 남으면 want 할당
+        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t remainder = total - alloc;
+
+        PUT(HDRP(ptr), PACK(alloc, 1));
+        PUT(FTRP(ptr), PACK(alloc, 1));
+
         if (remainder >= MIN_FREE_BLK) {
-            PUT(HDRP(ptr), PACK(asize, 1));
-            PUT(FTRP(ptr), PACK(asize, 1));
-            void *newbp = NEXT_BLKP(ptr);
-            PUT(HDRP(newbp), PACK(remainder, 0));
-            PUT(FTRP(newbp), PACK(remainder, 0));
-            newbp = coalesce(newbp);
-            insert_free(newbp);
-        } else { // 공간 없으면 그냥 합친 크기만큼 할당
-            PUT(HDRP(ptr), PACK(newsize, 1));
-            PUT(FTRP(ptr), PACK(newsize, 1));
+            void *nbp = NEXT_BLKP(ptr);
+            PUT(HDRP(nbp), PACK(remainder, 0));
+            PUT(FTRP(nbp), PACK(remainder, 0));
+            nbp = coalesce(nbp);
+            insert_free(nbp);
         }
         return ptr;
     }
 
     // 제자리 확장 2 - 왼쪽 흡수 시도
     void *prev_bp = PREV_BLKP(ptr);
-    size_t prev_alloc = GET_ALLOC(FTRP(prev_bp));
+    size_t prev_alloc = GET_ALLOC(HDRP(prev_bp));
     size_t prev_size = GET_SIZE(HDRP(prev_bp));
-    // 이전 블록이 가용이고 이전 블록과 크기를 합쳤을 때 할당 가능할 경우
-    if (!prev_alloc && (oldsize + prev_size) >= asize) {
+    if (!prev_alloc && (prev_size + oldsize) >= asize) {
         remove_free(prev_bp);
-        size_t newsize = oldsize + prev_size;
-        size_t remainder = newsize - asize;
-        void *prev_ptr = prev_bp;
-        memmove(prev_ptr, ptr, old_payload); // 왼쪽 블록으로 이동
+        size_t total = prev_size + oldsize;
+
+        void *newptr = prev_bp; // 왼쪽으로 확장
+        memmove(newptr, ptr, old_payload);
+
+        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t remainder = total - alloc;
+
+        PUT(HDRP(newptr), PACK(alloc, 1));
+        PUT(FTRP(newptr), PACK(alloc, 1));
+
         if (remainder >= MIN_FREE_BLK) {
-            PUT(HDRP(prev_ptr), PACK(asize, 1));
-            PUT(FTRP(prev_ptr), PACK(asize, 1));
-            void *newbp = NEXT_BLKP(prev_ptr);
-            PUT(HDRP(newbp), PACK(remainder, 0));
-            PUT(FTRP(newbp), PACK(remainder, 0));
-            newbp = coalesce(newbp);
-            insert_free(newbp);
-        } else {
-            PUT(HDRP(prev_ptr), PACK(newsize, 1));
-            PUT(FTRP(prev_ptr), PACK(newsize, 1));
+            void *nbp = NEXT_BLKP(newptr);
+            PUT(HDRP(nbp), PACK(remainder, 0));
+            PUT(FTRP(nbp), PACK(remainder, 0));
+            nbp = coalesce(nbp);
+            insert_free(nbp);
         }
-        return prev_ptr;
+        return newptr;
     }
 
     // 제자리 확장 3 - 왼쪽 오른쪽 둘 다 흡수 시도
-    if (!prev_alloc && !next_alloc && (oldsize + prev_size + next_size) >= asize) {
+    if (!prev_alloc && !next_alloc && (prev_size + oldsize + next_size) >= asize) {
         remove_free(prev_bp);
         remove_free(next_bp);
+        size_t total = prev_size + oldsize + next_size;
 
-        size_t newsize = oldsize + prev_size + next_size;
-        size_t remainder = newsize - asize;
-        void *new_ptr = prev_bp; // 새로운 bp는 왼쪽이 됨
-        memmove(new_ptr, ptr, old_payload);
+        void *newptr = prev_bp;
+        memmove(newptr, ptr, old_payload);
+
+        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t remainder = total - alloc;
+
+        PUT(HDRP(newptr), PACK(alloc, 1));
+        PUT(FTRP(newptr), PACK(alloc, 1));
+
         if (remainder >= MIN_FREE_BLK) {
-            PUT(HDRP(new_ptr), PACK(asize, 1));
-            PUT(FTRP(new_ptr), PACK(asize, 1));
-            void *newbp = NEXT_BLKP(new_ptr);
-            PUT(HDRP(newbp), PACK(remainder, 0));
-            PUT(FTRP(newbp), PACK(remainder, 0));
-            newbp = coalesce(newbp);
-            insert_free(newbp);
-        } else {
-            PUT(HDRP(new_ptr), PACK(newsize, 1));
-            PUT(FTRP(new_ptr), PACK(newsize, 1));
+            void *nbp = NEXT_BLKP(newptr);
+            PUT(HDRP(nbp), PACK(remainder, 0));
+            PUT(FTRP(nbp), PACK(remainder, 0));
+            nbp = coalesce(nbp);
+            insert_free(nbp);
         }
-        return new_ptr;
+        return newptr;
     }
 
     // 제자리 확장에 실패 한 것이므로 완전히 새로운 블록을 할당 후 기존은 free
-    void *newptr = mm_malloc(size);
+    void *newptr = mm_malloc(size + REALLOC_BUFFER);
     if (newptr == NULL) {
         return NULL;
     }
