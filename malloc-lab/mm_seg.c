@@ -41,8 +41,8 @@ team_t team = {
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 두 값의 최댓값 매크로
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-#define LISTS 20          // 리스트 개수
-#define REALLOC_BUFFER 32 // Realloc 최적화용 버퍼 크기
+#define LISTS 16          // 리스트 개수
+#define REALLOC_BUFFER 16 // Realloc 최적화용 버퍼 크기
 
 #define PACK(size, alloc) ((size) | (alloc)) // 한 워드에 블록 전체 크기와 할당 비트를 OR로 묶어 저장
 // size는 8의 배수로 저장, alloc은 하위 비트(보통 bit0) 사용(0=free, 1=alloc)
