@@ -11,15 +11,19 @@ CFLAGS = -Wall -O2 -g
 
 OBJS_COMMON = mdriver.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
 
-# 기본 타겟 : 두 실행파일 모두 빌드
-all: mdriver_mm mdriver_ex
+# 기본 타겟 : 실행파일 모두 빌드
+all: mdriver_mm mdriver_ex mdriver_seg
 
 # 묵시적 가용 리스트 방식(mm.c)
-mdriver_mm: $(OBJS_COMMON) mm.O2
+mdriver_mm: $(OBJS_COMMON) mm.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 # 명시적 가용 리스트 방식(mm_ex.c)
 mdriver_ex: $(OBJS_COMMON) mm_ex.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+# 분리 가용 리스트 방식(mm_seg.c)
+mdriver_seg: $(OBJS_COMMON) mm_seg.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 # 개별 오브젝트 규칙
@@ -36,13 +40,19 @@ mm.o: mm.c mm.h memlib.h
 mm_ex.o: mm_ex.c mm.h memlib.h
 	$(CC) $(CFLAGS) -c mm_ex.c -o $@
 
+mm_seg.o: mm_seg.c mm.h memlib.h
+	$(CC) $(CFLAGS) -c mm_seg.c -o $@
+
 handin:
 	cp mm.c $(HANDINDIR)/$(TEAM)-$(VERSION)-mm.c
 
 handin_ex:
 	cp mm_ex.c $(HANDINDIR)/$(TEAM)-$(VERSION)-mm_ex.c
 
+handin_seg:
+	cp mm_seg.c $(HANDINDIR)/$(TEAM)-$(VERSION)-mm_seg.c
+
 clean:
-	rm -f *~ *.o mdriver mdriver_mm mdriver_ex
+	rm -f *~ *.o mdriver mdriver_mm mdriver_ex mdriver_seg
 
 
