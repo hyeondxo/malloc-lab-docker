@@ -86,8 +86,8 @@ team_t team = {
 #define PRED(bp) (*(char **)(bp))       // pred 칸에 든 값(다른 블록의 bp)
 #define SUCC(bp) (*((char **)(bp) + 1)) // succ 칸에 든 값
 
-#define PTRSIZE ((int)sizeof(void *))          // 8
-#define MIN_FREE_BLK (2 * WSIZE + 2 * PTRSIZE) // 4 + 4 + 8 + 8 = 24B
+#define PTRSIZE ((int)sizeof(void *))              // 8
+#define MIN_FREE_BLK ((2 * WSIZE) + (2 * PTRSIZE)) // 4 + 4 + 8 + 8 = 24B
 
 static char *heap_listp = NULL;
 static char *seg_free_lists[LISTS]; // 크기대별로 head 포인터를 보관
@@ -335,6 +335,7 @@ void *mm_realloc(void *ptr, size_t size) {
     }
 
     size_t oldsize = GET_SIZE(HDRP(ptr)); // 현재 블록 크기(헤더/풋터 포함)
+    size_t old_payload = oldsize - (2 * WSIZE);
 
     // 제자리 축소
     if (asize <= oldsize) { // 기존 공간보다 작은 공간으로 재할당해야하는 경우
@@ -378,12 +379,61 @@ void *mm_realloc(void *ptr, size_t size) {
         return ptr;
     }
 
+    // 제자리 확장 2 - 왼쪽 흡수 시도
+    void *prev_bp = PREV_BLKP(ptr);
+    size_t prev_alloc = GET_ALLOC(FTRP(prev_bp));
+    size_t prev_size = GET_SIZE(HDRP(prev_bp));
+    // 이전 블록이 가용이고 이전 블록과 크기를 합쳤을 때 할당 가능할 경우
+    if (!prev_alloc && (oldsize + prev_size) >= asize) {
+        remove_free(prev_bp);
+        size_t newsize = oldsize + prev_size;
+        size_t remainder = newsize - asize;
+        void *prev_ptr = prev_bp;
+        memmove(prev_ptr, ptr, old_payload); // 왼쪽 블록으로 이동
+        if (remainder >= MIN_FREE_BLK) {
+            PUT(HDRP(prev_ptr), PACK(asize, 1));
+            PUT(FTRP(prev_ptr), PACK(asize, 1));
+            void *newbp = NEXT_BLKP(prev_ptr);
+            PUT(HDRP(newbp), PACK(remainder, 0));
+            PUT(FTRP(newbp), PACK(remainder, 0));
+            newbp = coalesce(newbp);
+            insert_free(newbp);
+        } else {
+            PUT(HDRP(prev_ptr), PACK(newsize, 1));
+            PUT(FTRP(prev_ptr), PACK(newsize, 1));
+        }
+        return prev_ptr;
+    }
+
+    // 제자리 확장 3 - 왼쪽 오른쪽 둘 다 흡수 시도
+    if (!prev_alloc && !next_alloc && (oldsize + prev_size + next_size) >= asize) {
+        remove_free(prev_bp);
+        remove_free(next_bp);
+
+        size_t newsize = oldsize + prev_size + next_size;
+        size_t remainder = newsize - asize;
+        void *new_ptr = prev_bp; // 새로운 bp는 왼쪽이 됨
+        memmove(new_ptr, ptr, old_payload);
+        if (remainder >= MIN_FREE_BLK) {
+            PUT(HDRP(new_ptr), PACK(asize, 1));
+            PUT(FTRP(new_ptr), PACK(asize, 1));
+            void *newbp = NEXT_BLKP(new_ptr);
+            PUT(HDRP(newbp), PACK(remainder, 0));
+            PUT(FTRP(newbp), PACK(remainder, 0));
+            newbp = coalesce(newbp);
+            insert_free(newbp);
+        } else {
+            PUT(HDRP(new_ptr), PACK(newsize, 1));
+            PUT(FTRP(new_ptr), PACK(newsize, 1));
+        }
+        return new_ptr;
+    }
+
     // 제자리 확장에 실패 한 것이므로 완전히 새로운 블록을 할당 후 기존은 free
     void *newptr = mm_malloc(size);
     if (newptr == NULL) {
         return NULL;
     }
-    size_t old_payload = oldsize - (2 * WSIZE);
     size_t copysize = MIN(size, old_payload);
     memcpy(newptr, ptr, copysize);
     mm_free(ptr);
