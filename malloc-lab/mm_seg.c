@@ -227,9 +227,6 @@ static size_t round_up_for_binary(size_t asize) {
     if (asize <= 128) { // trace 10 해결
         return asize;
     }
-    // if (asize > CHUNKSIZE * 4) {
-    //     return asize;ㄴ
-    // }
     size_t np2 = next_pow2(asize);
     // 2의 제곱수일 때 차이가 분할 제한보다 작으면 올림 -> trace 7 해결
     return (np2 > asize && (np2 - asize) < SPLIT_LIMIT) ? np2 : asize;
@@ -244,6 +241,12 @@ void *mm_malloc(size_t size) {
     if (size == 0) {
         return NULL;
     }
+
+    // trace 8 해결 - 작은 할당 블록 크기(128이하)에 대해서 가장 가까운 2의 제곱수로 맞춤
+    if (size <= 128) {
+        size = next_pow2(size);
+    }
+
     size_t asize; // 조정된 블록 크기 (헤더/풋터 오버헤드 + 8바이트 정렬을 반영한 실제 크기)
     // asize 계산 = 오버헤드 포함 + 8바이트 정렬
     if (size <= DSIZE) {
