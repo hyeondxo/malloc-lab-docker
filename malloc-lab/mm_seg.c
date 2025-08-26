@@ -45,6 +45,12 @@ team_t team = {
 
 #define LISTS 16          // 리스트 개수
 #define REALLOC_BUFFER 16 // Realloc 최적화용 버퍼 크기
+#define SPLIT_LIMIT 64    // 분할 최솟값
+/**
+ * 64B 미만 잔여는 분할하지 않기 위함. 재사용성이 매우 낮은 자투리 free 블록의 생성을 억제하게 됨
+ * -> 쓸모없는 free 조각들이 가용 리스트에 쌓이지 않아 외부 단편화가 감소됨
+ * -> 결과적으로 힙의 최대 총량이 감소하여 util 점수의 상승
+ */
 
 #define PACK(size, alloc) ((size) | (alloc)) // 한 워드에 블록 전체 크기와 할당 비트를 OR로 묶어 저장
 // size는 8의 배수로 저장, alloc은 하위 비트(보통 bit0) 사용(0=free, 1=alloc)
@@ -174,9 +180,10 @@ static void *find_fit(size_t asize) {
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp)); // asize를 놓을 bp의 크기
     remove_free(bp);                   // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
-    // 기본 요청 크기에 버퍼를 붙이지. 단 버퍼까지 붙이고도 잔여가 free 최소 크기 이상 남아야 함
+
     size_t want = asize + REALLOC_BUFFER;
-    if (csize >= want && (csize - want) >= MIN_FREE_BLK) { // 버퍼까지 줄 수 있을 때
+    // 기본 요청 크기에 버퍼를 붙이지. 단 버퍼까지 붙이고도 잔여가 free 최소 크기 이상 남아야 함
+    if (csize >= want && (csize - want) >= SPLIT_LIMIT) { // 버퍼까지 줄 수 있을 때
         // 앞부분 할당 표기
         PUT(HDRP(bp), PACK(want, 1));
         PUT(FTRP(bp), PACK(want, 1));
@@ -186,7 +193,7 @@ static void place(void *bp, size_t asize) {
         PUT(FTRP(newbp), PACK(remained, 0));
         newbp = coalesce(newbp);
         insert_free(newbp);
-    } else if (csize - asize >= MIN_FREE_BLK) { // 버퍼까지 주는 것은 무리
+    } else if (csize - asize >= SPLIT_LIMIT) { // 버퍼까지 주는 것은 무리
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         void *newbp = NEXT_BLKP(bp);
@@ -362,7 +369,7 @@ void *mm_realloc(void *ptr, size_t size) {
         size_t keep = oldsize - asize;
 
         // 버퍼까지 붙여 분할 가능하면 asize+buffer로 축소 + 잔여 free
-        if (oldsize >= want && (oldsize - want) >= MIN_FREE_BLK) {
+        if (oldsize >= want && (oldsize - want) >= SPLIT_LIMIT) {
             PUT(HDRP(ptr), PACK(want, 1));
             PUT(FTRP(ptr), PACK(want, 1));
 
@@ -374,7 +381,7 @@ void *mm_realloc(void *ptr, size_t size) {
             insert_free(newbp);
         }
         // 버퍼까지는 무리지만 정상 분할은 가능한 경우 - asize만 주고 분할
-        else if (keep >= MIN_FREE_BLK) {
+        else if (keep >= SPLIT_LIMIT) {
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
 
@@ -398,13 +405,13 @@ void *mm_realloc(void *ptr, size_t size) {
         size_t total = oldsize + next_size;
 
         // 버퍼까지 주고도 잔여가 free 최소크기 이상 남으면 want 할당
-        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t alloc = (total >= want && (total - want) >= SPLIT_LIMIT) ? want : total;
         size_t remainder = total - alloc;
 
         PUT(HDRP(ptr), PACK(alloc, 1));
         PUT(FTRP(ptr), PACK(alloc, 1));
 
-        if (remainder >= MIN_FREE_BLK) {
+        if (remainder >= SPLIT_LIMIT) {
             void *nbp = NEXT_BLKP(ptr);
             PUT(HDRP(nbp), PACK(remainder, 0));
             PUT(FTRP(nbp), PACK(remainder, 0));
@@ -425,13 +432,13 @@ void *mm_realloc(void *ptr, size_t size) {
         void *newptr = prev_bp; // 왼쪽으로 확장
         memmove(newptr, ptr, old_payload);
 
-        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t alloc = (total >= want && (total - want) >= SPLIT_LIMIT) ? want : total;
         size_t remainder = total - alloc;
 
         PUT(HDRP(newptr), PACK(alloc, 1));
         PUT(FTRP(newptr), PACK(alloc, 1));
 
-        if (remainder >= MIN_FREE_BLK) {
+        if (remainder >= SPLIT_LIMIT) {
             void *nbp = NEXT_BLKP(newptr);
             PUT(HDRP(nbp), PACK(remainder, 0));
             PUT(FTRP(nbp), PACK(remainder, 0));
@@ -450,13 +457,13 @@ void *mm_realloc(void *ptr, size_t size) {
         void *newptr = prev_bp;
         memmove(newptr, ptr, old_payload);
 
-        size_t alloc = (total >= want && (total - want) >= MIN_FREE_BLK) ? want : total;
+        size_t alloc = (total >= want && (total - want) >= SPLIT_LIMIT) ? want : total;
         size_t remainder = total - alloc;
 
         PUT(HDRP(newptr), PACK(alloc, 1));
         PUT(FTRP(newptr), PACK(alloc, 1));
 
-        if (remainder >= MIN_FREE_BLK) {
+        if (remainder >= SPLIT_LIMIT) {
             void *nbp = NEXT_BLKP(newptr);
             PUT(HDRP(nbp), PACK(remainder, 0));
             PUT(FTRP(nbp), PACK(remainder, 0));
