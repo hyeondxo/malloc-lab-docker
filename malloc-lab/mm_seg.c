@@ -34,9 +34,9 @@ team_t team = {
     /* Second member's email address (leave blank if none) */
     "."};
 
-#define WSIZE 4             // word 크기이자 헤더/풋터의 크기(바이트)
-#define DSIZE 8             // double word 크기. 최소 블록 크기(헤더 4 + 풋터 4)와 정렬 단위로 사용
-#define CHUNKSIZE (1 << 10) // 힙을 한 번에 얼만큼 확장할지의 기본값(4096 -> 1024B)
+#define WSIZE 4            // word 크기이자 헤더/풋터의 크기(바이트)
+#define DSIZE 8            // double word 크기. 최소 블록 크기(헤더 4 + 풋터 4)와 정렬 단위로 사용
+#define CHUNKSIZE (1 << 9) // 힙을 한 번에 얼만큼 확장할지의 기본값(4096 -> 1024B)
 // 힙을 늘리는 크기인 CHUNKSIZE를 4096->1024로 축소하니 점수 2점 상향(메모리 사용 점수 48 -> 50, 전체 88 -> 90)
 // 왜? - 증분을 줄이면 필요한 시점에서만 조금씩 늘려 여분 free가 작아지므로 힙의 과잉 확장이 줄어듦
 
@@ -108,6 +108,8 @@ static void place(void *, size_t);
 static void insert_free(void *bp);
 static void remove_free(void *bp);
 static int get_class(size_t size); // 크기에 맞는 클래스 인덱스를 계산 (범위 기반 segregared fits)
+static size_t next_pow2(size_t x);
+static size_t round_up_for_binary(size_t asize);
 
 /*
  * mm_init - initialize the malloc package.
@@ -181,7 +183,8 @@ static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp)); // asize를 놓을 bp의 크기
     remove_free(bp);                   // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
 
-    size_t want = asize + REALLOC_BUFFER;
+    size_t want = (asize >= 256) ? asize + REALLOC_BUFFER : asize;
+    // size_t want = REALLOC_BUFFER + asize;
     // 기본 요청 크기에 버퍼를 붙이지. 단 버퍼까지 붙이고도 잔여가 free 최소 크기 이상 남아야 함
     if (csize >= want && (csize - want) >= SPLIT_LIMIT) { // 버퍼까지 줄 수 있을 때
         // 앞부분 할당 표기
@@ -208,6 +211,30 @@ static void place(void *bp, size_t asize) {
     }
 }
 
+// asize 이상인 가장 가까운 2의 제곱수로 올림
+static size_t next_pow2(size_t x) {
+    if (x <= 16) {
+        return 16;
+    }
+    size_t p = 16;
+    while (p < x) {
+        p <<= 1; // 2배씩 증가
+    }
+    return p;
+}
+
+static size_t round_up_for_binary(size_t asize) {
+    if (asize <= 128) { // trace 10 해결
+        return asize;
+    }
+    // if (asize > CHUNKSIZE * 4) {
+    //     return asize;ㄴ
+    // }
+    size_t np2 = next_pow2(asize);
+    // 2의 제곱수일 때 차이가 분할 제한보다 작으면 올림 -> trace 7 해결
+    return (np2 > asize && (np2 - asize) < SPLIT_LIMIT) ? np2 : asize;
+}
+
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
@@ -232,6 +259,7 @@ void *mm_malloc(size_t size) {
     if (asize < MIN_FREE_BLK) {
         asize = MIN_FREE_BLK;
     }
+    asize = round_up_for_binary(asize);
     // 가용 리스트에서 맞는 블록 찾기
     char *bp = find_fit(asize);
     if (bp != NULL) {
@@ -240,7 +268,10 @@ void *mm_malloc(size_t size) {
     }
     size_t extendsize; // 맞는 블록이 없을 때 힙을 얼마나 키워야할 지. 바이트 단위
     // 맞는 블록이 없을 경우 -> 힙을 늘려 새 가용블록 만들기
-    extendsize = MAX(asize, CHUNKSIZE); // 최소 CHUNKSIZE 이상 늘려야함 너무 자주 sbrk하지 않도록
+    extendsize = MAX(asize, CHUNKSIZE * 2); // 최소 CHUNKSIZE 이상 늘려야함 너무 자주 sbrk하지 않도록
+    if (asize > CHUNKSIZE * 4) {
+        extendsize = asize;
+    }
     // 인자 단위가 워드이므로 워드사이즈로 나누어주기
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL) {
         return NULL;
@@ -359,7 +390,8 @@ void *mm_realloc(void *ptr, size_t size) {
     if (asize < MIN_FREE_BLK) {
         asize = MIN_FREE_BLK;
     }
-    size_t want = asize + REALLOC_BUFFER;
+    // size_t want = asize + REALLOC_BUFFER;
+    size_t want = (asize >= 256) ? asize + REALLOC_BUFFER : asize;
 
     size_t oldsize = GET_SIZE(HDRP(ptr)); // 현재 블록 크기(헤더/풋터 포함)
     size_t old_payload = oldsize - (2 * WSIZE);
@@ -474,7 +506,7 @@ void *mm_realloc(void *ptr, size_t size) {
     }
 
     // 제자리 확장에 실패 한 것이므로 완전히 새로운 블록을 할당 후 기존은 free
-    void *newptr = mm_malloc(size + REALLOC_BUFFER);
+    void *newptr = mm_malloc(size);
     if (newptr == NULL) {
         return NULL;
     }
