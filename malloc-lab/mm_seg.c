@@ -36,16 +36,20 @@ team_t team = {
 
 #define WSIZE 4            // word 크기이자 헤더/풋터의 크기(바이트)
 #define DSIZE 8            // double word 크기. 최소 블록 크기(헤더 4 + 풋터 4)와 정렬 단위로 사용
-#define CHUNKSIZE (1 << 9) // 힙을 한 번에 얼만큼 확장할지의 기본값(4096 -> 1024B)
-// 힙을 늘리는 크기인 CHUNKSIZE를 4096->1024로 축소하니 점수 2점 상향(메모리 사용 점수 48 -> 50, 전체 88 -> 90)
+#define CHUNKSIZE (1 << 9) // 힙을 한 번에 얼만큼 확장할지의 기본값(4096 -> 512B)
+// 힙을 늘리는 크기인 CHUNKSIZE를 4096->1024->512로 축소
 // 왜? - 증분을 줄이면 필요한 시점에서만 조금씩 늘려 여분 free가 작아지므로 힙의 과잉 확장이 줄어듦
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 두 값의 최댓값 매크로
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-#define LISTS 16          // 리스트 개수
-#define REALLOC_BUFFER 16 // Realloc 최적화용 버퍼 크기
-#define SPLIT_LIMIT 64    // 분할 최솟값
+#define LISTS 16           // 리스트 개수
+#define REALLOC_BUFFER 128 // Realloc 최적화용 버퍼 크기
+/**
+ * 기본 버퍼 크기를 대폭 늘렷음. 9번 트레이스에서 100% 호환됨
+ * 작은 버퍼가 필요한 경우에는 버퍼를 작게 할당하는 방식으로 변경 : 95(55+40) -> 97(57+40) 2점 상승
+ */
+#define SPLIT_LIMIT 64 // 분할 최솟값
 /**
  * 64B 미만 잔여는 분할하지 않기 위함. 재사용성이 매우 낮은 자투리 free 블록의 생성을 억제하게 됨
  * -> 쓸모없는 free 조각들이 가용 리스트에 쌓이지 않아 외부 단편화가 감소됨
@@ -96,7 +100,7 @@ team_t team = {
 #define SUCC(bp) (*((char **)(bp) + 1)) // succ 칸에 든 값
 
 #define PTRSIZE ((int)sizeof(void *))              // 8
-#define MIN_FREE_BLK ((2 * WSIZE) + (2 * PTRSIZE)) // 4 + 4 + 8 + 8 = 24B
+#define MIN_FREE_BLK ((2 * WSIZE) + (2 * PTRSIZE)) // 헤더4 + 풋터4 + pred8 + succ8 = 24B
 
 static char *heap_listp = NULL;
 static char *seg_free_lists[LISTS]; // 크기대별로 head 포인터를 보관
@@ -113,8 +117,8 @@ static size_t round_up_for_binary(size_t asize);
 
 /*
  * mm_init - initialize the malloc package.
- * 힙 뼈대 만들기
  */
+// 프롤로그(8B 할당) + 에필로그(0B 헤더)로 힙 경계를 만들고, CHUNKSIZE만큼 확장해 첫 가용 블록을 구성
 int mm_init(void) {
     // 힙에 4워드 공간을 요구, 실패하면 -1
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
@@ -142,6 +146,7 @@ int mm_init(void) {
 }
 
 // 힙을 확장
+// 요청 워드 수를 짝수로 맞춘 뒤 sbrk. 새 블록을 free로 표기 후, 에필로그를 새 위치로 이동하고 coalesce+insert_free.
 static void *extend_heap(size_t words) {
     char *bp;
     size_t size;
@@ -159,6 +164,7 @@ static void *extend_heap(size_t words) {
     return bp;
 }
 
+// 요청 asize의 클래스부터 상위 클래스를 순회하며, 리스트 내에서 best-fit(가장 작은 적합 블록)을 선택
 static void *find_fit(size_t asize) {
     // 2. Best-fit 방식
     int idx = get_class(asize);
@@ -179,11 +185,17 @@ static void *find_fit(size_t asize) {
     return best_bp; // 가능한 칸을 찾지 못했을 경우
 }
 
+// csize 블록에 asize를 배치.
+// - asize>512면 버퍼(REALLOC_BUFFER=128) 고려, 그 외는 +DSIZE 정도만 여유
+// - 분할은 잔여가 SPLIT_LIMIT(64B) 이상일 때만 수행(스플린터 억제)
+// - 잔여가 작으면 통째로 할당
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp)); // asize를 놓을 bp의 크기
     remove_free(bp);                   // bp는 쓰일 가용 블록이므로 가용 리스트에서 제거
 
-    size_t want = (asize >= 256) ? asize + REALLOC_BUFFER : asize;
+    // 여기 512 초과로 늘리니 7번 96%로 상승. 7번의 최대 할당이 512이기 때문임
+    // realloc buffere를 128까지 늘려버렸기 때문에 이 조건이 없으면 내부 단편화가 넘 심해짐
+    size_t want = (asize > 512) ? asize + REALLOC_BUFFER : asize + DSIZE;
     // size_t want = REALLOC_BUFFER + asize;
     // 기본 요청 크기에 버퍼를 붙이지. 단 버퍼까지 붙이고도 잔여가 free 최소 크기 이상 남아야 함
     if (csize >= want && (csize - want) >= SPLIT_LIMIT) { // 버퍼까지 줄 수 있을 때
@@ -223,20 +235,23 @@ static size_t next_pow2(size_t x) {
     return p;
 }
 
+// asize가 2^k 경계에 '충분히' 근접(차이 < SPLIT_LIMIT)하면 상향해 재사용 클래스 정규화 및 외부 단편화 완화
 static size_t round_up_for_binary(size_t asize) {
-    if (asize <= 128) { // trace 10 해결
+    if (asize <= 128) {
         return asize;
     }
     size_t np2 = next_pow2(asize);
-    // 2의 제곱수일 때 차이가 분할 제한보다 작으면 올림 -> trace 7 해결
+    // 2의 제곱수일 때 차이가 분할 제한보다 작으면 올림
     return (np2 > asize && (np2 - asize) < SPLIT_LIMIT) ? np2 : asize;
 }
 
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
- * 맞는 가용 블록 찾아 배치
  */
+// asize 계산 = 헤더/풋터(8B) 포함 + 8B 정렬.
+// size <= 8B면 최소 블록인 2*DSIZE(=16B)로 승격.
+// 그 외엔 8의 배수로 반올림. asize < MIN_FREE_BLK(=24B)이면 24B로 승격.
 void *mm_malloc(size_t size) {
     if (size == 0) {
         return NULL;
@@ -283,7 +298,7 @@ void *mm_malloc(size_t size) {
     return bp;
 }
 
-// 클래스 별 LIFO 삽입
+// 크기 클래스 head에 LIFO 삽입
 static void insert_free(void *bp) {
     int idx = get_class(GET_SIZE(HDRP(bp)));
     PRED(bp) = NULL;
@@ -294,7 +309,7 @@ static void insert_free(void *bp) {
     seg_free_lists[idx] = (char *)bp;
 }
 
-// 가용 리스트에서 bp 제거
+// pred/succ를 O(1)로 갱신
 static void remove_free(void *bp) {
     int idx = get_class(GET_SIZE(HDRP(bp)));
     char *pred = PRED(bp); // *PRED_PTR(bp) 와 같음. pred의 값
@@ -308,15 +323,12 @@ static void remove_free(void *bp) {
     if (succ) {
         PRED(succ) = pred;
     }
-    // 자기 포인터는 끊어두기
-    PRED(bp) = NULL;
-    SUCC(bp) = NULL;
 }
 
 /*
  * mm_free - Freeing a block does nothing.
- * 메모리 사용 여부 표시를 변경하고 병합해서 재사용
  */
+// free 후 즉시 coalesce하여 큰 블록으로 합치고, 분리 가용 리스트에 삽입
 void mm_free(void *ptr) {
     size_t size = GET_SIZE(HDRP(ptr)); // 현재 블록의 헤더에서 블록 전체 크기를 얻음
 
@@ -402,7 +414,6 @@ void *mm_realloc(void *ptr, size_t size) {
     // 제자리 축소
     if (asize <= oldsize) {
         size_t keep = oldsize - asize;
-
         // 버퍼까지 붙여 분할 가능하면 asize+buffer로 축소 + 잔여 free
         if (oldsize >= want && (oldsize - want) >= SPLIT_LIMIT) {
             PUT(HDRP(ptr), PACK(want, 1));
@@ -429,11 +440,48 @@ void *mm_realloc(void *ptr, size_t size) {
         // [C] 잔여가 너무 작으면: 통째로 유지(내부 버퍼 효과 유지)
         return ptr;
     }
-
     // 제자리 확장 1 - 오른쪽 흡수 시도
     void *next_bp = NEXT_BLKP(ptr);
     size_t next_alloc = GET_ALLOC(HDRP(next_bp));
     size_t next_size = GET_SIZE(HDRP(next_bp));
+    // 우선 오른쪽이 에필로그(alloc=1 && size=0)면 그 자리에서 힙을 연장 후 흡수
+    if (next_alloc && next_size == 0) {
+        size_t want = asize; // 이 때는 버퍼 필요없음
+
+        size_t extend_size = 0;
+        if (want > oldsize) {
+            extend_size = want - oldsize;
+        }
+        extend_size = MAX(extend_size, MIN_FREE_BLK);
+
+        void *extend_ptr = extend_heap(extend_size / WSIZE);
+
+        // 방금 생긴 꼬리 free를 바로 흡수
+        remove_free(extend_ptr);
+        // 총 할당 블록 크기와 자투리 블록 계산
+        size_t total_size = oldsize + GET_SIZE(HDRP(extend_ptr));
+        size_t alloc = asize;
+        size_t remainder = total_size - alloc;
+        if (remainder < SPLIT_LIMIT) {
+            alloc = total_size;
+            remainder = 0;
+        } else if (total_size >= want && (total_size - want) >= SPLIT_LIMIT) {
+            alloc = want;
+            remainder = total_size - want;
+        }
+
+        PUT(HDRP(ptr), PACK(alloc, 1));
+        PUT(FTRP(ptr), PACK(alloc, 1));
+
+        if (remainder >= SPLIT_LIMIT) {
+            void *nbp = NEXT_BLKP(ptr);
+            PUT(HDRP(nbp), PACK(remainder, 0));
+            PUT(FTRP(nbp), PACK(remainder, 0));
+            nbp = coalesce(nbp);
+            insert_free(nbp);
+        }
+        return ptr;
+    }
     // 다음 블록이 가용이고, 다음블록까지 크기를 합치면 그 자리에 할당 가능할 때
     if (!next_alloc && (oldsize + next_size) >= asize) {
         remove_free(next_bp);
