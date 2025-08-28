@@ -2,13 +2,13 @@
 # 동적 할당기(Dynamic Memory Allocator) 구현
 
 C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
-본 구현은 Segregated Explicit Free Lists 기반의 동적 메모리 할당기이며, 클래스별(best-fit) 탐색, 즉시 병합(coalesce), 스플린터 억제(SPLIT_LIMIT), realloc 친화 버퍼/힙 끝 특수 확장 등을 결합해 **메모리 효율(util)**과 처리량(thru) 사이의 균형을 노립니다.
+본 구현은 Segregated Explicit Free Lists 기반의 동적 메모리 할당기이며, 클래스별(best-fit) 탐색, 즉시 병합(coalesce), 스플린터 억제(SPLIT_LIMIT), realloc 친화 버퍼/힙 끝 특수 확장 등을 결합해 메모리 효율(util)과 처리량(thru) 사이의 균형을 노립니다.
 
 
 ## 과제의 의도 (Motivation)
 
 - 힙 레이아웃, 정렬, 오버헤드를 직접 다루며 동적 메모리 할당의 본질을 이해합니다.
-- **단편화(내부/외부)**를 줄이기 위한 정책 설계(클래스, best-fit, 스플린터 억제, 2^k 정규화, realloc 친화)를 경험합니다.
+- 단편화(내부/외부)를 줄이기 위한 정책 설계(클래스, best-fit, 스플린터 억제, 2^k 정규화, realloc 친화)를 경험합니다.
 - 성능-품질 트레이드오프(util vs thru) 튜닝을 체감합니다.
 
 
