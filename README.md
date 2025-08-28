@@ -80,16 +80,17 @@ C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
 - mm_realloc: 제자리 확장 성공 시 O(1), 좌측 흡수 이동 시 O(n) (payload 이동), 실패 시 malloc+memcpy+free
 
 ## 빌드/테스트
-
+```
 make           # 빌드
 ./mdriver      # correctness/util/thru 종합 평가
 또는
 make clean && make && ./mdriver
+```
 
-	•	결과 표의 의미:
-	•	util: (총 payload) / (peak heap). 클수록 메모리 효율↑
-	•	thru: Kops(천 연산/초). 클수록 처리량↑
-	•	Perf index: 가중 합(예: 50 util + 40 thru)
+- 결과 표의 의미
+	- util: (총 payload) / (peak heap). 클수록 메모리 효율↑
+	- thru: Kops(천 연산/초). 클수록 처리량↑
+	- Perf index: 가중 합(예: 50 util + 40 thru)
 
 
 
