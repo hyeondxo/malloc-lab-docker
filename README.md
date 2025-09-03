@@ -2,13 +2,15 @@
 # 동적 할당기(Dynamic Memory Allocator) 구현
 
 C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
-본 구현은 Segregated Explicit Free Lists 기반의 동적 메모리 할당기이며, 클래스별(best-fit) 탐색, 즉시 병합(coalesce), 스플린터 억제(SPLIT_LIMIT), realloc 친화 버퍼/힙 끝 특수 확장 등을 결합해 메모리 효율(util)과 처리량(thru) 사이의 균형을 노립니다.
+묵시적 가용 리스트(Implicit Free Lists) -> 명시적 가용 리스트(Explicit Free Lists) -> 분리 가용 리스트(Segregated Free Lists)로 점차 발전시켜가며 First-fit과 Next-fit, Bset-fit 등의 다양한 방식을 적용시켜보고, 테스트 점수를 확인합니다.
+<br>
+100점 만점의 테스트 결과 점수는 메모리 효율성(Utiliztion)과 처리량(Throughput)을 종합적으로 테스트한 점수의 총 합계입니다.
 
 
 ## 과제의 의도 (Motivation)
 
 - 힙 레이아웃, 정렬, 오버헤드를 직접 다루며 동적 메모리 할당의 본질을 이해합니다.
-- 단편화(내부/외부)를 줄이기 위한 정책 설계(클래스, best-fit, 스플린터 억제, 2^k 정규화, realloc 친화)를 경험합니다.
+- 단편화(내부/외부)를 줄이기 위해 다양한 정책들을 설계하고 적용해봅니다.
 - 성능-품질 트레이드오프(util vs thru) 튜닝을 체감합니다.
 
 
@@ -17,10 +19,10 @@ C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
 - mm.c 이외 파일은 수정하지 않고 테스트를 통과합니다.
 - make / ./mdriver로 correctness/throughput/utilization을 검증합니다.
 
-## 구현 기능 목록 정리
+## 구현 기능 목록 / 구현한 방식
 
 - **`mm_init()`** : 프롤로그(8B)와 에필로그(0B 헤더)를 설치하고, CHUNKSIZE만큼 extend_heap 호출로 첫 가용 블록을 마련합니다.
-   - -> 분리 가용 리스트 seg_free_lists[LISTS]의 헤드를 모두 NULL로 초기화합.
+   - -> 분리 가용 리스트 seg_free_lists[LISTS]의 헤드를 모두 NULL로 초기화.
 
 - **`mm_malloc(size)`** : 요청 size를 8B 정렬/오버헤드(헤더/풋터) 포함한 asize로 변환합니다.
    - -> 작은 요청은 next_pow2/round_up_for_binary로 2^k 경계에 가깝게 정규화하여 외부 단편화(클래스 확산)를 줄입니다.
@@ -52,7 +54,7 @@ C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
 
 
 
-## 알고리즘 설계 포인트
+## 적용한 알고리즘, 정책
 
 1) 클래스 + best-fit 혼합
    - 클래스(대역폭)로 먼저 외부 탐색 공간을 줄이고, 리스트 내부에서는 best-fit로 내부 단편화를 최소화합니다.
@@ -79,13 +81,15 @@ C 언어의 malloc/free/realloc을 직접 구현하는 과제입니다.
 - mm_free: O(1) (병합 시 remove/insert O(1))
 - mm_realloc: 제자리 확장 성공 시 O(1), 좌측 흡수 이동 시 O(n) (payload 이동), 실패 시 malloc+memcpy+free
 
-## 빌드/테스트
+## 빌드/테스트 결과
 ```
 make           # 빌드
 ./mdriver      # correctness/util/thru 종합 평가
 또는
 make clean && make && ./mdriver
 ```
+
+<img width="319" height="228" alt="KakaoTalk_Photo_2025-09-03-22-15-37" src="https://github.com/user-attachments/assets/268fd80e-02d5-481d-bc32-73f5dc6bd5c1" />
 
 - 결과 표의 의미
 	- util: (총 payload) / (peak heap). 클수록 메모리 효율↑
@@ -96,13 +100,20 @@ make clean && make && ./mdriver
 
 ## 느낀 점
 
-직접 할당기를 만들며 동적 메모리의 핵심은 “형식과 불변식”임을 체감했다. HDRP/FTRP/NEXT_BLKP/PREV_BLKP 같은 블록 산술은 사소해 보이지만, 한 번만 어긋나도 이웃 판별·병합·리스트 무결성이 연쇄적으로 무너진다. 또한 프롤로그/에필로그의 의미(경계 표식), MIN_FREE_BLK 형식 보장, 8B 정렬처럼 “작은 규칙”이 전체 안정성을 좌우한다는 사실도 절실히 배웠다.
+직접 할당기를 만들면서 동적 메모리는 결국 “형식과 불변식”이라는 걸 제대로 느꼈다. HDRP/FTRP/NEXT_BLKP/PREV_BLKP 같은 블록 산술이 한 글자만 어긋나도, 바로 이웃 판별이 틀어지고 병합이 꼬여서 리스트가 깨져버리거나 Segmentation Fault로 이어지는 상황을 수도 없이 경험하며, 프롤로그/에필로그 같은 경계 표식을 왜 적용해야 하는지, MIN_FREE_BLK 형식(헤더/풋터+pred/succ)과 8바이트 정렬을 지키는 것이 얼마나 중요한 규칙인지를 직접 체감할 수 있었다.
+<br>
 
-단편화 제어가 성능의 절반 이상을 결정했다. SPLIT_LIMIT로 스플린터를 억제하고, 작은 요청을 2^k 정규화해 클래스 재사용률을 높였더니 외부 단편화가 눈에 띄게 준 것을 확인할 수 있었다. 반면, 무분별한 버퍼는 내부 단편화를 키워 util을 떨어뜨렸기에 결국 분리 가용 리스트 + 클래스 내 best-fit에 조건부 버퍼를 더해 트레이스별 성향(작게·자주 vs 덩어리)과 균형을 잡는 게 관건이었던 것 같다.
 
-특히 realloc에서는 제자리 확장의 가치가 컸다. 우→좌→양측 병합을 시도하고, 힙 끝(에필로그)에서는 정확치만 확장하자 복사 비용과 피크 힙이 동시에 줄어 util이 크게 개선되는 것을 확인할 수 있었다. 이때도 핵심은 순서와 불변식—coalesce 전 remove_free, 분할 시 형식 최소치 준수였던 것 같다.
+성능 쪽에서는 단편화 제어가 핵심이었던 것 같다. SPLIT_LIMIT로 스플린터(애매한 잔여) 를 안 만들고, 작은 요청은 2^k 정규화로 16/32/64 같은 버킷에 모아두니 외부 단편화가 눈에 띄게 줄었던 것과, 반대로 “버퍼나마 많이 주면 좋겠지?” 하고 막 붙이면 내부 단편화가 커져서 util이 떨어져버리는 상황을 경험하며 분리 가용 리스트 + 클래스 내부 best-fit에 조건부 버퍼만 얹는 식으로, 작게+자주 커지는 패턴과 덩어리 패턴을 따로 다루는 방식으로 메모리를 효율적으로 사용하게 되는 것을 직접 느낄 수 있었다.
+<br>
 
-마지막으로 상수 튜닝(CHUNKSIZE, SPLIT_LIMIT, 버퍼 크기) 는 만능 스위치가 아니라 정책을 드러내는 파라미터임을 깨달았다. 수치를 바꾸기보다 “왜 이 상황에서 이 정책이 필요한가”를 추론하고, trace별 증상(피크 힙↑, 스플린터↑, 이동 재할당↑) 과 연결해 조정했을 때 점수가 가장 안정적으로 오르는 것을 확인할 수 있었다.
+
+realloc의 최적화 과정 또한 상당히 쉽지 않았다. 오른쪽 → 왼쪽 → 양쪽 순으로 흡수해서 끝까지 버티고, 힙 끝(에필로그)에서는 want=asize로 “정확히 필요한 만큼만” sbrk 하니까 복사 비용과 피크 힙이 동시에 줄어들었습니다. trace 10에서 util이 확 올라간 이유가 바로 이거였다. 여기서도 순서가 생명이기에 coalesce 전에 remove_free, 분할할 때 최소 형식치 등을 지켰기에 리스트가 안 망가질 수 있었다.
+<br>
+
+
+마지막의 마지막까지 최적화를 시도하였지만 3점이 모자란 점수는 다소 아쉽긴 하다. 하지만 일주일 간 malloc을 구현하며 재미있는 몰입을 할 수 있었던 것 같다.
+
 
 ## 참고문헌
 [CS:APP(3판) Chapter 9.9 – Dynamic Memory Allocation](https://product.kyobobook.co.kr/detail/S000001868716)
